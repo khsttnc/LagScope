@@ -28,16 +28,48 @@ LAG CAUSE: RAM RUNNING OUT (91%, 1545 MB free) - top user: TslGame 5537 MB
 - Windows PowerShell 5.1 (built in) — nothing to install
 - NVIDIA GPU for GPU temperature and VRAM (load works on any GPU)
 
+## Installation
+
+No installer, no dependencies. LagScope is plain PowerShell that ships with Windows.
+
+1. **Download** — on this page click the green **Code** button → **Download ZIP**
+   (or grab the ZIP from the [Releases](../../releases) page).
+2. **Unblock the ZIP — do this *before* extracting!**
+   Windows marks every file downloaded from the internet. Unsigned scripts with that mark are blocked by
+   *Smart App Control* / SmartScreen ("This app was blocked" / "Windows protected your PC").
+   - Right-click the downloaded `LagScope-main.zip` → **Properties**
+   - At the bottom, next to *"This file came from another computer…"*, tick **Unblock**
+   - Click **Apply** → **OK**
+3. **Extract** — right-click the ZIP → **Extract All…** → **Extract**.
+   Put the folder somewhere permanent, e.g. `Documents\LagScope`. Keep all files in the same folder.
+4. **Run** — double-click **`START_LAGSCOPE.bat`**.
+   - *"Do you want to allow this app to make changes?"* → **Yes** (admin rights are only used to read the CPU temperature sensor).
+   - If SmartScreen still appears: **More info** → **Run anyway**.
+   - A small black bar appears at the bottom of your screen — LagScope is running.
+
+> **Already extracted without unblocking?** Delete the folder and start again from step 2,
+> or unblock all files at once in PowerShell:
+> ```powershell
+> Get-ChildItem "C:\path\to\LagScope" -Recurse | Unblock-File
+> ```
+
 ## Usage
 
-1. Download the repository (**Code → Download ZIP**) and extract it.
-2. **Before extracting**, right-click the ZIP → **Properties** → tick **Unblock** → **OK**.
-   Otherwise Windows *Smart App Control* / SmartScreen may block the scripts.
-3. Double-click **`START_LAGSCOPE.bat`** (accept the admin prompt — it is needed to read the CPU temperature sensor).
-4. Play your game. The overlay shows live values and the current lag cause.
-5. When you're done: right-click the **(i)** tray icon → **Exit (show report)**.
+1. Start **`START_LAGSCOPE.bat`** *before* launching your game.
+2. Play. The overlay shows live values and the current lag cause; a Windows notification pops up when your PC struggles.
+3. When you're done: right-click the **(i)** tray icon next to the clock → **Exit (show report)**.
+4. Read the verdict. All reports and logs are saved in the `Logs` folder next to the scripts.
 
 > The overlay is not visible in *exclusive fullscreen*. Use **borderless** or **windowed fullscreen**. Measurements and the report work either way.
+
+### Tray menu
+
+| Item | Action |
+|---|---|
+| Show report now | Report for the session so far, without stopping |
+| Hide / show overlay | Toggle the bar |
+| Open logs folder | Opens `Logs\` in Explorer |
+| Exit (show report) | Stops monitoring and shows the final report |
 
 ### Example report
 
@@ -94,6 +126,22 @@ It only empties Windows' file cache (the *standby list*). Running programs keep 
 ```
 
 > RamCleaner reduces stutter caused by a bloated cache. It cannot create more RAM — if LagScope keeps reporting *Not enough RAM*, close background apps or upgrade your memory.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| *"Smart App Control blocked this app"* / *"Windows protected your PC"* | The files still carry the internet mark. Unblock the ZIP before extracting (see [Installation](#installation), step 2) or run `Get-ChildItem <folder> -Recurse \| Unblock-File`. |
+| Windows asks *"How do you want to open this file?"* (Notepad, etc.) | You double-clicked a `.ps1` file. Close the dialog and double-click the **`.bat`** file instead (type: *Windows Batch File*). |
+| Nothing visible after starting | Check the tray (click **^** next to the clock) for the (i) icon. If your game runs in exclusive fullscreen, switch to borderless. |
+| Two (i) icons in the tray | You started it twice. Right-click one → **Exit**. |
+| `CPU --C` is shown | Your motherboard doesn't expose the temperature through Windows. Heat problems are still detected via CPU throttling (`CLK` value). |
+| `GPU --C` / no VRAM value | Only NVIDIA GPUs report temperature/VRAM (via `nvidia-smi`). Load % works on all GPUs. |
+| Script window closes immediately | Right-click the `.bat` → **Run as administrator**, or open PowerShell and run `powershell -ExecutionPolicy Bypass -File .\LagScope.ps1` to see the error. |
+
+## Uninstall
+
+Close LagScope from the tray, then delete the folder. Nothing is installed, no registry keys, no services.
 
 ## How it works
 
