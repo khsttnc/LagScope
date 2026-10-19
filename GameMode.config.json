@@ -1,0 +1,78 @@
+{
+  "_help": "Edit this file to customize Game Mode. Process names are without .exe. Wildcards (*) allowed.",
+
+  "games": [
+    "TslGame",
+    "dota2",
+    "bf1",
+    "cs2",
+    "VALORANT-Win64-Shipping",
+    "FortniteClient-Win64-Shipping",
+    "r5apex",
+    "GTA5",
+    "RobloxPlayerBeta",
+    "fm",
+    "ManorLords-Win64-Shipping"
+  ],
+
+  "autoDetectGameFolders": [
+    "\\steamapps\\common\\",
+    "\\Epic Games\\",
+    "\\Riot Games\\",
+    "\\EA Games\\",
+    "\\Electronic Arts\\",
+    "\\Ubisoft Game Launcher\\games\\",
+    "\\XboxGames\\",
+    "\\GOG Galaxy\\Games\\"
+  ],
+
+  "notGames": [
+    "*Launcher*",
+    "*CrashHandler*",
+    "*CrashReport*",
+    "EasyAntiCheat*",
+    "BEService*",
+    "*Setup*",
+    "*Updater*",
+    "*Helper*"
+  ],
+
+  "closeApps": [
+    "Spotify",
+    "HD-Player",
+    "BlueStacks*",
+    "OneDrive",
+    "Teams",
+    "ms-teams",
+    "PhoneExperienceHost",
+    "YourPhone",
+    "Widgets",
+    "AIPPT*"
+  ],
+
+  "neverTouch": [
+    "Discord",
+    "steam",
+    "steamwebhelper",
+    "EpicGamesLauncher",
+    "Battle.net",
+    "RiotClientServices",
+    "NVIDIA*",
+    "nvcontainer",
+    "Razer*",
+    "audiodg",
+    "obs64",
+    "explorer",
+    "powershell",
+    "Claude"
+  ],
+
+  "forceCloseAfterSeconds": 5,
+  "reopenAppsAfterGame": true,
+  "trimBackgroundRam": true,
+  "purgeStandbyList": true,
+  "setGameHighPriority": true,
+  "highPerformancePowerPlan": true,
+  "stopServices": [],
+  "checkIntervalSeconds": 3
+}

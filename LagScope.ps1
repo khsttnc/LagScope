@@ -164,7 +164,7 @@ function New-Report {
         GPU_MAXED      = "GPU at its limit (not a fault)"
     }
     $advice = @{
-        RAM            = "Close background apps (browser, Discord, Spotify, emulators) and run CLEAN_RAM_AUTO.bat. If it keeps happening, add more RAM. Also check that RAM runs in dual channel with XMP/EXPO enabled."
+        RAM            = "Close background apps (browser, Discord, Spotify, emulators) or let START_GAMEMODE.bat close them automatically when a game starts. If it keeps happening, add more RAM. Also check that RAM runs in dual channel with XMP/EXPO enabled."
         CPU_HEAT       = "Clean dust from the case, check the CPU cooler and thermal paste. Set Windows power mode to 'Best performance'."
         GPU_HEAT       = "Clean the GPU fans, improve case airflow, use a more aggressive fan curve."
         CPU_BOTTLENECK = "Lower CPU-heavy settings (view distance, crowds, effects), close background apps. An FPS cap reduces stutter."

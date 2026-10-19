@@ -4,7 +4,9 @@
 
 LagScope is a tiny, dependency-free PowerShell tool. It puts a click-through overlay at the bottom of your screen, watches your hardware while you play, and tells you in plain words what is causing the lag. When you quit, it gives you a report with the **main problem** and what to do about it.
 
-It also ships with **RamCleaner**, which automatically purges the Windows standby list when free memory gets low (the same trick ISLC uses) to reduce micro-stutters.
+It also ships with:
+- **Game Mode**: detects when a game starts and frees your PC for it. It closes background apps, trims the RAM other programs are holding, boosts game priority and switches to the High performance power plan, then restores everything when you quit.
+- **RamCleaner**: automatically purges the Windows standby list when free memory gets low (the same trick ISLC uses) to reduce micro-stutters.
 
 ```
 CPU  43%  CORE100%  CLK 129%  CPU  --C  RAM  91%  GPU  45%  GPU 67C  DISK  2%
@@ -111,6 +113,57 @@ Peak values:
 .\LagScope.ps1 -IntervalMs 1000   # sample every second (default 2000)
 ```
 
+## Game Mode
+
+Fixes the most common cause LagScope finds, *not enough RAM*, automatically.
+
+Double-click **`START_GAMEMODE.bat`** once (admin prompt → **Yes**). A shield icon appears in the tray and Game Mode waits in the background. As soon as a game starts it:
+
+1. **Closes unneeded apps** from your list (Spotify, BlueStacks, OneDrive, Teams, …): politely first, then forcefully after 5 s if they hide in the tray
+2. **Trims the RAM held by every other background program** (`EmptyWorkingSet`), not just the standby cache
+3. **Purges the standby list**
+4. Sets the game to **High priority**
+5. Switches to the **High performance** power plan
+6. Optionally stops Windows services you list
+
+You get a notification like *"Game Mode ON: TslGame. Freed 2140 MB RAM. Closed: Spotify, HD-Player"*.
+When the game closes, the power plan and services are restored and the closed apps are reopened.
+
+| Launcher | What it does |
+|---|---|
+| `START_GAMEMODE.bat` | Runs in the tray, boosts automatically whenever a game starts |
+| `BOOST_NOW.bat` | Applies the boost once, right now (apps are not reopened) |
+
+Tray menu: *Boost now*, *Restore now*, *Edit settings*, *Open log*, *Exit*.
+
+### How games are detected
+
+- Any process listed in `games` (e.g. `TslGame`, `dota2`, `cs2`), **or**
+- Any windowed process running from a game library folder (`steamapps\common`, `Epic Games`, `Riot Games`, `XboxGames`, …)
+- Launchers, crash handlers and anti-cheat services (`notGames`) are ignored
+
+### Settings: `GameMode.config.json`
+
+Open it from the tray (*Edit settings*) or with Notepad. Changes apply on the next check, with no restart needed.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `closeApps` | Spotify, BlueStacks, OneDrive, Teams, Phone Link, Widgets | Apps to close when a game starts. Add e.g. `"chrome"` or `"Discord"` if you want those closed too |
+| `neverTouch` | Discord, Steam, Epic, Battle.net, Riot, NVIDIA, Razer, OBS, Claude | Never closed **and** never trimmed |
+| `games` | popular titles | Extra process names to treat as games |
+| `forceCloseAfterSeconds` | `5` | Kill apps still running after this delay. `0` = only ask politely |
+| `reopenAppsAfterGame` | `true` | Restart closed apps when the game ends |
+| `trimBackgroundRam` | `true` | Trim RAM held by background programs |
+| `purgeStandbyList` | `true` | Purge the standby cache |
+| `setGameHighPriority` | `true` | Run the game at High priority |
+| `highPerformancePowerPlan` | `true` | Switch power plan while gaming (skipped if your PC doesn't have it) |
+| `stopServices` | `[]` | Services to stop while gaming, e.g. `"SysMain"`, `"WSearch"`. Restarted afterwards |
+
+> ⚠️ Apps in `closeApps` are force-closed. Don't add programs where you might have **unsaved work** (Word, editors…).
+> Trimmed programs aren't harmed: their memory is paged back in when you switch to them, so they may feel slow for a second.
+
+Everything Game Mode does is written to `Logs\GameMode.log`.
+
 ## RamCleaner
 
 | Launcher | What it does |
@@ -135,13 +188,15 @@ It only empties Windows' file cache (the *standby list*). Running programs keep 
 | Windows asks *"How do you want to open this file?"* (Notepad, etc.) | You double-clicked a `.ps1` file. Close the dialog and double-click the **`.bat`** file instead (type: *Windows Batch File*). |
 | Nothing visible after starting | Check the tray (click **^** next to the clock) for the (i) icon. If your game runs in exclusive fullscreen, switch to borderless. |
 | Two (i) icons in the tray | You started it twice. Right-click one → **Exit**. |
+| Game Mode doesn't react to my game | Add the game's process name (Task Manager → Details) to `games` in `GameMode.config.json`. |
+| Game Mode closed something I need | Remove it from `closeApps` or add it to `neverTouch`. |
 | `CPU --C` is shown | Your motherboard doesn't expose the temperature through Windows. Heat problems are still detected via CPU throttling (`CLK` value). |
 | `GPU --C` / no VRAM value | Only NVIDIA GPUs report temperature/VRAM (via `nvidia-smi`). Load % works on all GPUs. |
 | Script window closes immediately | Right-click the `.bat` → **Run as administrator**, or open PowerShell and run `powershell -ExecutionPolicy Bypass -File .\LagScope.ps1` to see the error. |
 
 ## Uninstall
 
-Close LagScope from the tray, then delete the folder. Nothing is installed, no registry keys, no services.
+Exit LagScope and Game Mode from the tray, then delete the folder. Nothing is installed, no registry keys, no services.
 
 ## How it works
 
