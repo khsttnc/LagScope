@@ -31,10 +31,13 @@ No installer, no dependencies, just Windows PowerShell.
 
 ## Usage
 
-Just play. Right-click the shield icon for everything else:
+On first start LagScope asks **which apps to close while you play**. It shows everything that's running, with icons and how much RAM each app uses. Tick what you don't need in-game and leave the rest (e.g. **Spotify** for music, **Discord** for voice chat). You can change this any time from the tray menu.
+
+Then just play. Right-click the shield icon for everything else:
 
 | Menu item | |
 |---|---|
+| **Apps to close in games…** | Tick/untick apps; shows how much RAM you'll free |
 | Game Mode | Free the PC when a game starts (on/off) |
 | Auto RAM cleaner while gaming | on/off |
 | Stop dev tools in games | Docker, WSL, Expo/Next.js/Vite dev servers, llama-server, Ollama (on/off) |
@@ -53,7 +56,7 @@ Tray switches are saved here automatically. Other useful keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `closeApps` | Spotify, BlueStacks, OneDrive, Teams, Phone Link, Widgets | Closed when a game starts, reopened afterwards. Add e.g. `"chrome"` |
+| `closeApps` | BlueStacks, OneDrive, Teams, Phone Link, Widgets | Set from the *Apps to close in games…* window. Closed when a game starts, reopened afterwards |
 | `neverTouch` | Discord, Steam, Epic, Battle.net, Riot, NVIDIA, Razer, Logitech, OBS, anti-cheat… | Never closed and never trimmed |
 | `games` | popular titles | Extra process names to treat as games (others are auto-detected from game library folders) |
 | `notGames` | launchers, crash handlers, anti-cheat | Never treated as the game |
@@ -83,7 +86,7 @@ Tray switches are saved here automatically. Other useful keys:
 | Windows asks *"How do you want to open this file?"* | You clicked the `.ps1`. Double-click **`LagScope.bat`**. |
 | *"LagScope is already running"* | It's in the tray. Click **^** next to the clock. |
 | My game isn't detected | Add its process name (Task Manager → Details) to `games`. |
-| Something I need gets closed | Remove it from `closeApps` or add it to `neverTouch`. |
+| Something I need gets closed | Tray → **Apps to close in games…** → untick it. |
 | `CPU --C` | Your motherboard doesn't expose the CPU temperature. Heat is still detected via throttling (`CLK`). |
 | `GPU --C` | GPU temperature/VRAM need an NVIDIA GPU (`nvidia-smi`). |
 

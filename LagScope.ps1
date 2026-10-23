@@ -107,6 +107,7 @@ $script:defaults = [ordered]@{
     trimBackgroundRam = $true; trimMinProcessMB = 150; purgeStandbyOnGameStart = $true
     setGameHighPriority = $false; highPerformancePowerPlan = $true; stopServices = @()
     devProcesses = @(); devServerPatterns = @(); shutdownWsl = $true
+    appPickerShown = $false
 }
 function Read-Config {
     $cfg = [ordered]@{}
@@ -567,6 +568,143 @@ function Update-OverlayVisibility {
     }
 }
 
+# ---------------- App picker (choose what to close while gaming) ----------------
+# Apps that are never offered because the game or the PC needs them
+$hardProtected = @(
+    "steam","steamwebhelper","steamservice","EpicGamesLauncher","EpicWebHelper","Battle.net","Agent",
+    "RiotClient*","vgc","vgtray","BEService*","EasyAntiCheat*","FACEIT*",
+    "NVIDIA*","nv*","NVDisplay*","Radeon*","AMDRS*","Razer*","GameManagerService*","lghub*","logi*",
+    "audiodg","explorer","powershell","pwsh","conhost","WindowsTerminal","OpenConsole","cmd",
+    "msedgewebview2","RuntimeBroker","SearchHost","ShellExperienceHost","StartMenuExperienceHost","TextInputHost",
+    "ctfmon","sihost","dllhost","taskhostw","SecurityHealthSystray","MsMpEng","Taskmgr","GameBar*","XboxPcApp*"
+)
+
+$friendlyNames = @{
+    "HD-Player" = "BlueStacks"; "BlueStacks*" = "BlueStacks (background helpers)"; "OneDrive" = "Microsoft OneDrive"
+    "Teams" = "Microsoft Teams"; "ms-teams" = "Microsoft Teams"; "PhoneExperienceHost" = "Phone Link"; "YourPhone" = "Phone Link"
+    "Widgets" = "Windows Widgets"; "chrome" = "Google Chrome"; "msedge" = "Microsoft Edge"; "firefox" = "Firefox"
+    "Spotify" = "Spotify"; "Discord" = "Discord"; "claude" = "Claude"; "Code" = "Visual Studio Code"
+}
+function Get-FriendlyName($name) { if ($friendlyNames.ContainsKey($name)) { return $friendlyNames[$name] } return $name.TrimEnd('*') }
+
+function Get-AppCandidates($cfg) {
+    $winDir = $env:windir
+    $game = if ($script:session) { $script:session.Game } else { $null }
+    $rows = @{}
+    foreach ($p in Get-Process) {
+        $path = $null; try { $path = $p.Path } catch {}
+        if (-not $path -or $path -like "$winDir*") { continue }
+        if ($p.Id -eq $PID) { continue }
+        $n = $p.ProcessName
+        if ($game -and $n -eq $game) { continue }
+        if (Test-NameMatch $n $hardProtected) { continue }
+        if (Test-NameMatch $n $systemCritical) { continue }
+        if (Test-IsGame $p $cfg) { continue }
+        if (-not $rows.ContainsKey($n)) {
+            $desc = if ($friendlyNames.ContainsKey($n)) { $friendlyNames[$n] } else { $n }
+            if (-not $friendlyNames.ContainsKey($n)) { try { $vi = $p.MainModule.FileVersionInfo; if ($vi.FileDescription) { $desc = $vi.FileDescription.Trim() } elseif ($vi.ProductName) { $desc = $vi.ProductName.Trim() } } catch {} }
+            $rows[$n] = [pscustomobject]@{ Name = $n; Title = $desc; Path = $path; RamMB = 0; Running = $true }
+        }
+        $rows[$n].RamMB += [math]::Round($p.WorkingSet64 / 1MB)
+    }
+    # apps already selected but not running right now
+    foreach ($n in @($cfg.closeApps)) {
+        if (-not $n -or ($rows.Keys | Where-Object { $_ -like $n })) { continue }
+        $t = Get-FriendlyName $n
+        $same = $rows.Values | Where-Object { -not $_.Running -and $_.Title -eq $t } | Select-Object -First 1
+        if ($same) { $same.Name = "$($same.Name);$n" }   # e.g. Teams + ms-teams shown once
+        else { $rows[$n] = [pscustomobject]@{ Name = $n; Title = $t; Path = $null; RamMB = 0; Running = $false } }
+    }
+    # hide tiny background helpers nobody recognises
+    return $rows.Values | Where-Object { -not $_.Running -or $_.RamMB -ge 15 } | Sort-Object @{e={$_.Running};Descending=$true}, @{e={$_.RamMB};Descending=$true}
+}
+
+function Show-AppPicker {
+    $cfg = $script:cfg
+    $bg = [System.Drawing.Color]::FromArgb(32, 32, 32); $fg = [System.Drawing.Color]::White
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "LagScope - Apps to close while gaming"
+    $dlg.Size = New-Object System.Drawing.Size(560, 600)
+    $dlg.StartPosition = "CenterScreen"; $dlg.TopMost = $true
+    $dlg.FormBorderStyle = "FixedDialog"; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.BackColor = $bg; $dlg.ForeColor = $fg
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = "Which apps should close when you start a game?"
+    $title.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+    $title.Location = New-Object System.Drawing.Point(16, 12); $title.Size = New-Object System.Drawing.Size(520, 26)
+    $dlg.Controls.Add($title)
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = "Ticked apps are closed to free RAM and reopened when the game ends.`nLeave anything you use while playing unticked (music, voice chat, OBS...)."
+    $hint.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 200)
+    $hint.Location = New-Object System.Drawing.Point(16, 42); $hint.Size = New-Object System.Drawing.Size(520, 42)
+    $dlg.Controls.Add($hint)
+
+    $list = New-Object System.Windows.Forms.ListView
+    $list.View = "Details"; $list.CheckBoxes = $true; $list.FullRowSelect = $true; $list.HeaderStyle = "Nonclickable"
+    $list.Location = New-Object System.Drawing.Point(16, 92); $list.Size = New-Object System.Drawing.Size(512, 390)
+    $list.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 45); $list.ForeColor = $fg; $list.BorderStyle = "FixedSingle"
+    [void]$list.Columns.Add("App", 330); [void]$list.Columns.Add("RAM", 80, "Right"); [void]$list.Columns.Add("", 80)
+    $icons = New-Object System.Windows.Forms.ImageList; $icons.ImageSize = New-Object System.Drawing.Size(20, 20); $icons.ColorDepth = "Depth32Bit"
+    $list.SmallImageList = $icons
+
+    foreach ($a in Get-AppCandidates $cfg) {
+        $item = New-Object System.Windows.Forms.ListViewItem($a.Title)
+        if ($a.Path) {
+            try { $icons.Images.Add($a.Name, [System.Drawing.Icon]::ExtractAssociatedIcon($a.Path)); $item.ImageKey = $a.Name } catch {}
+        }
+        [void]$item.SubItems.Add($(if ($a.Running) { "$($a.RamMB) MB" } else { "" }))
+        [void]$item.SubItems.Add($(if ($a.Running) { "running" } else { "not running" }))
+        if (-not $a.Running) { $item.ForeColor = [System.Drawing.Color]::Gray }
+        $item.Tag = $a.Name
+        $item.Checked = [bool](($a.Name -split ';') | Where-Object { Test-NameMatch $_ $cfg.closeApps })
+        [void]$list.Items.Add($item)
+    }
+    $dlg.Controls.Add($list)
+
+    $sum = New-Object System.Windows.Forms.Label
+    $sum.Location = New-Object System.Drawing.Point(16, 488); $sum.Size = New-Object System.Drawing.Size(512, 22)
+    $sum.ForeColor = [System.Drawing.Color]::FromArgb(120, 230, 120)
+    $updateSum = {
+        $mb = 0; $c = 0
+        foreach ($it in $list.Items) { if ($it.Checked) { $c++; $mb += [int]("0" + ($it.SubItems[1].Text -replace '[^0-9]', '')) } }
+        $sum.Text = "$c apps selected - frees about $mb MB of RAM when a game starts"
+    }.GetNewClosure()
+    $list.Add_ItemChecked($updateSum)
+    & $updateSum
+    $dlg.Controls.Add($sum)
+
+    function New-Btn($text, $x, $w) {
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $text; $b.Location = New-Object System.Drawing.Point($x, 516); $b.Size = New-Object System.Drawing.Size($w, 32)
+        $b.FlatStyle = "Flat"; $b.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60); $b.ForeColor = $fg
+        $dlg.Controls.Add($b); return $b
+    }
+    $none = New-Btn "Untick all" 16 100
+    $none.Add_Click({ foreach ($it in $list.Items) { $it.Checked = $false } }.GetNewClosure())
+    $cancel = New-Btn "Cancel" 328 90
+    $cancel.DialogResult = "Cancel"
+    $save = New-Btn "Save" 428 100
+    $save.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+    $save.DialogResult = "OK"
+    $dlg.AcceptButton = $save; $dlg.CancelButton = $cancel
+
+    if ($dlg.ShowDialog() -eq "OK") {
+        $chosen = @(); $unchosen = @()
+        foreach ($it in $list.Items) { $names = "$($it.Tag)" -split ';'; if ($it.Checked) { $chosen += $names } else { $unchosen += $names } }
+        # keep wildcard entries (e.g. BlueStacks*) unless the user unticked them
+        $kept = @(@($cfg.closeApps) | Where-Object { $_ -like '*`**' -and -not ($unchosen -contains $_) -and -not ($chosen -contains $_) })
+        Save-Setting "closeApps" @($chosen + $kept | Select-Object -Unique)
+        # an app the user explicitly chose to close must not be blocked by neverTouch
+        Save-Setting "neverTouch" @(@($cfg.neverTouch) | Where-Object { $n = $_; -not ($chosen | Where-Object { $_ -like $n }) })
+        Write-Log "Apps to close updated: $($chosen -join ', ')"
+        $script:appsItem.Text = "Apps to close in games ($(@($script:cfg.closeApps).Count))..."
+    }
+    $dlg.Dispose()
+}
+
 # ---------------- Start with Windows ----------------
 $taskName = "LagScope"
 function Test-Autostart { [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) }
@@ -596,6 +734,9 @@ $menu = New-Object System.Windows.Forms.ContextMenuStrip
 
 $statusItem = $menu.Items.Add("Waiting for a game..."); $statusItem.Enabled = $false
 [void]$menu.Items.Add("-")
+$script:appsItem = $menu.Items.Add("Apps to close in games ($(@($script:cfg.closeApps).Count))...")
+$script:appsItem.Font = New-Object System.Drawing.Font($script:appsItem.Font, [System.Drawing.FontStyle]::Bold)
+$script:appsItem.Add_Click({ Show-AppPicker })
 
 function New-Toggle($text, $key) {
     $item = New-Object System.Windows.Forms.ToolStripMenuItem($text)
@@ -731,6 +872,10 @@ $timer.Add_Tick({
 Write-Log "LagScope started (admin: $isAdmin)"
 $tray.ShowBalloonTip(3000, "LagScope is running", "I'll take care of your PC as soon as a game starts. Right-click the shield icon for options.", [System.Windows.Forms.ToolTipIcon]::Info)
 Update-OverlayVisibility
+if (-not $script:cfg.appPickerShown) {
+    Save-Setting "appPickerShown" $true
+    Show-AppPicker
+}
 $timer.Start()
 [System.Windows.Forms.Application]::Run()
 $tray.Dispose()

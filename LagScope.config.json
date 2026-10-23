@@ -5,6 +5,7 @@
   "gameMode": true,
   "autoRamCleaner": true,
   "stopDevTools": true,
+  "appPickerShown": false,
 
   "sampleIntervalMs": 2000,
 
@@ -48,7 +49,6 @@
   ],
 
   "closeApps": [
-    "Spotify",
     "HD-Player",
     "BlueStacks*",
     "OneDrive",
