@@ -510,6 +510,18 @@ function New-Report {
     return ($l -join "`r`n")
 }
 
+# Apps that are never offered because the game or the PC needs them
+$hardProtected = @(
+    "steam","steamwebhelper","steamservice","EpicGamesLauncher","EpicWebHelper","Battle.net","Agent",
+    "RiotClient*","vgc","vgtray","BEService*","EasyAntiCheat*","FACEIT*",
+    "NVIDIA*","nv*","NVDisplay*","Radeon*","AMDRS*","Razer*","GameManagerService*","lghub*","logi*",
+    "audiodg","explorer","powershell","pwsh","conhost","WindowsTerminal","OpenConsole","cmd",
+    "msedgewebview2","RuntimeBroker","SearchHost","ShellExperienceHost","StartMenuExperienceHost","TextInputHost",
+    "ctfmon","sihost","dllhost","taskhostw","SecurityHealthSystray","MsMpEng","Taskmgr","GameBar*","XboxPcApp*",
+    "ShellHost","cowork-svc","*svc","*Service","*Svc","python*","pythonw*","py","uv","uvx","node","java","javaw",
+    "wsl*","vmmem*","Docker*","com.docker.*","git*","ssh*","LagScope*"
+)
+
 # ---------------- Game Mode actions ----------------
 $script:boosted = $false
 $script:closedApps = @()
@@ -524,6 +536,7 @@ function Close-Apps($cfg, $gamePid) {
         $_.Id -ne $gamePid -and $_.Id -ne $PID -and
         (Test-NameMatch $_.ProcessName $cfg.closeApps) -and
         -not (Test-NameMatch $_.ProcessName $cfg.neverTouch) -and
+        -not (Test-NameMatch $_.ProcessName $hardProtected) -and
         -not (Test-NameMatch $_.ProcessName $systemCritical)
     })
     $closed = @()
@@ -760,16 +773,6 @@ function Update-OverlayVisibility {
 }
 
 # ---------------- App picker (choose what to close while gaming) ----------------
-# Apps that are never offered because the game or the PC needs them
-$hardProtected = @(
-    "steam","steamwebhelper","steamservice","EpicGamesLauncher","EpicWebHelper","Battle.net","Agent",
-    "RiotClient*","vgc","vgtray","BEService*","EasyAntiCheat*","FACEIT*",
-    "NVIDIA*","nv*","NVDisplay*","Radeon*","AMDRS*","Razer*","GameManagerService*","lghub*","logi*",
-    "audiodg","explorer","powershell","pwsh","conhost","WindowsTerminal","OpenConsole","cmd",
-    "msedgewebview2","RuntimeBroker","SearchHost","ShellExperienceHost","StartMenuExperienceHost","TextInputHost",
-    "ctfmon","sihost","dllhost","taskhostw","SecurityHealthSystray","MsMpEng","Taskmgr","GameBar*","XboxPcApp*"
-)
-
 $friendlyNames = @{
     "HD-Player" = "BlueStacks"; "BlueStacks*" = "BlueStacks (background helpers)"; "OneDrive" = "Microsoft OneDrive"
     "Teams" = "Microsoft Teams"; "ms-teams" = "Microsoft Teams"; "PhoneExperienceHost" = "Phone Link"; "YourPhone" = "Phone Link"
@@ -887,7 +890,7 @@ function Show-AppPicker {
         foreach ($it in $list.Items) { $names = "$($it.Tag)" -split ';'; if ($it.Checked) { $chosen += $names } else { $unchosen += $names } }
         # keep wildcard entries (e.g. BlueStacks*) unless the user unticked them
         $kept = @(@($cfg.closeApps) | Where-Object { $_ -like '*`**' -and -not ($unchosen -contains $_) -and -not ($chosen -contains $_) })
-        Save-Setting "closeApps" @($chosen + $kept | Select-Object -Unique)
+        Save-Setting "closeApps" @($chosen + $kept | Select-Object -Unique | Where-Object { -not (Test-NameMatch $_ $hardProtected) })
         # an app the user explicitly chose to close must not be blocked by neverTouch
         Save-Setting "neverTouch" @(@($cfg.neverTouch) | Where-Object { $n = $_; -not ($chosen | Where-Object { $_ -like $n }) })
         Write-Log "Apps to close updated: $($chosen -join ', ')"
