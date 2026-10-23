@@ -1,5 +1,16 @@
 {
-  "_help": "Edit this file to customize Game Mode. Process names are without .exe. Wildcards (*) allowed.",
+  "_help": "LagScope settings. Most switches can also be toggled from the tray menu. Process names are without .exe; wildcards (*) allowed.",
+
+  "overlay": "auto",
+  "gameMode": true,
+  "autoRamCleaner": true,
+  "stopDevTools": true,
+
+  "sampleIntervalMs": 2000,
+
+  "ramCleanerMinFreeMB": 2048,
+  "ramCleanerMinStandbyMB": 1024,
+  "ramCleanerCooldownSeconds": 60,
 
   "games": [
     "TslGame",
@@ -14,7 +25,6 @@
     "fm",
     "ManorLords-Win64-Shipping"
   ],
-
   "autoDetectGameFolders": [
     "\\steamapps\\common\\",
     "\\Epic Games\\",
@@ -25,7 +35,6 @@
     "\\XboxGames\\",
     "\\GOG Galaxy\\Games\\"
   ],
-
   "notGames": [
     "*Launcher*",
     "*CrashHandler*",
@@ -34,7 +43,8 @@
     "BEService*",
     "*Setup*",
     "*Updater*",
-    "*Helper*"
+    "*Helper*",
+    "ExecPubg"
   ],
 
   "closeApps": [
@@ -46,10 +56,8 @@
     "ms-teams",
     "PhoneExperienceHost",
     "YourPhone",
-    "Widgets",
-    "AIPPT*"
+    "Widgets"
   ],
-
   "neverTouch": [
     "Discord",
     "steam",
@@ -60,19 +68,42 @@
     "NVIDIA*",
     "nvcontainer",
     "Razer*",
+    "lghub*",
     "audiodg",
     "obs64",
     "explorer",
     "powershell",
-    "Claude"
+    "pwsh",
+    "Claude",
+    "BEService*",
+    "EasyAntiCheat*",
+    "vgc"
   ],
-
   "forceCloseAfterSeconds": 5,
   "reopenAppsAfterGame": true,
+
   "trimBackgroundRam": true,
-  "purgeStandbyList": true,
-  "setGameHighPriority": true,
+  "trimMinProcessMB": 150,
+  "purgeStandbyOnGameStart": true,
+  "setGameHighPriority": false,
   "highPerformancePowerPlan": true,
   "stopServices": [],
-  "checkIntervalSeconds": 3
+
+  "devProcesses": [
+    "llama-server*",
+    "ollama*",
+    "Docker Desktop",
+    "com.docker.*",
+    "vpnkit*"
+  ],
+  "devServerPatterns": [
+    "expo[\\\\/]bin[\\\\/]cli",
+    "next[\\\\/]dist[\\\\/]bin[\\\\/]next",
+    "next[\\\\/]dist[\\\\/]server",
+    "vite[\\\\/]bin",
+    "webpack-dev-server",
+    "nodemon",
+    "react-scripts[\\\\/]scripts[\\\\/]start"
+  ],
+  "shutdownWsl": true
 }
