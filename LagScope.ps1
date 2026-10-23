@@ -85,6 +85,173 @@ public static class LagScopeNative {
     }
 }
 "@
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+// Lightweight background sampler: PDH performance counters (English names, language-independent)
+// + one long-running nvidia-smi process. Runs on its own thread so the UI never blocks.
+public static class LagSampler {
+    [StructLayout(LayoutKind.Explicit)]
+    struct PDH_FMT_COUNTERVALUE { [FieldOffset(0)] public uint CStatus; [FieldOffset(8)] public double doubleValue; }
+
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] static extern uint PdhOpenQuery(string src, IntPtr user, out IntPtr query);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] static extern uint PdhAddEnglishCounter(IntPtr query, string path, IntPtr user, out IntPtr counter);
+    [DllImport("pdh.dll")] static extern uint PdhCollectQueryData(IntPtr query);
+    [DllImport("pdh.dll")] static extern uint PdhCloseQuery(IntPtr query);
+    [DllImport("pdh.dll")] static extern uint PdhGetFormattedCounterValue(IntPtr counter, uint format, IntPtr type, out PDH_FMT_COUNTERVALUE value);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] static extern uint PdhGetFormattedCounterArray(IntPtr counter, uint format, ref uint bufferSize, out uint itemCount, IntPtr buffer);
+
+    const uint FMT = 0x00000200 | 0x00008000; // PDH_FMT_DOUBLE | PDH_FMT_NOCAP100
+
+    static IntPtr q = IntPtr.Zero;
+    static Dictionary<string, IntPtr> c = new Dictionary<string, IntPtr>();
+
+    public static volatile bool Ready;
+    public static double Cpu = -1, Core = -1, Speed = -1, AvailMB = -1, StandbyMB = -1, DiskPct = -1, DiskMBs = -1;
+    public static double Gpu = -1, GpuTemp = -1, Vram = -1;
+    public static string LastError = "";
+
+    static Thread worker;
+    static volatile bool running;
+    static int intervalMs = 2000;
+    static Process smi;
+    static DateTime smiLast = DateTime.MinValue;
+
+    static void Add(string key, string path) {
+        IntPtr h;
+        if (PdhAddEnglishCounter(q, path, IntPtr.Zero, out h) == 0) c[key] = h;
+    }
+    static double Val(string key) {
+        IntPtr h; if (!c.TryGetValue(key, out h)) return -1;
+        PDH_FMT_COUNTERVALUE v;
+        if (PdhGetFormattedCounterValue(h, FMT, IntPtr.Zero, out v) != 0 || v.CStatus > 1) return -1;
+        return v.doubleValue;
+    }
+    // returns (name,value) pairs of a wildcard counter
+    static List<KeyValuePair<string, double>> Arr(string key) {
+        var res = new List<KeyValuePair<string, double>>();
+        IntPtr h; if (!c.TryGetValue(key, out h)) return res;
+        uint size = 0, count = 0;
+        uint r = PdhGetFormattedCounterArray(h, FMT, ref size, out count, IntPtr.Zero);
+        if (r != 0x800007D2 || size == 0) return res; // PDH_MORE_DATA
+        IntPtr buf = Marshal.AllocHGlobal((int)size);
+        try {
+            if (PdhGetFormattedCounterArray(h, FMT, ref size, out count, buf) != 0) return res;
+            int item = IntPtr.Size + 16; // szName + PDH_FMT_COUNTERVALUE (aligned)
+            for (int i = 0; i < count; i++) {
+                IntPtr p = IntPtr.Add(buf, i * item);
+                string name = Marshal.PtrToStringUni(Marshal.ReadIntPtr(p));
+                uint status = (uint)Marshal.ReadInt32(p, IntPtr.Size);
+                double val = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(p, IntPtr.Size + 8));
+                if (status <= 1) res.Add(new KeyValuePair<string, double>(name, val));
+            }
+        } finally { Marshal.FreeHGlobal(buf); }
+        return res;
+    }
+
+    public static void Start(int ms, string nvidiaSmiPath) {
+        if (running) return;
+        intervalMs = Math.Max(500, ms);
+        if (PdhOpenQuery(null, IntPtr.Zero, out q) != 0) { LastError = "PdhOpenQuery failed"; return; }
+        Add("cpu",   @"\Processor(_Total)\% Processor Time");
+        Add("cores", @"\Processor(*)\% Processor Time");
+        Add("perf",  @"\Processor Information(_Total)\% Processor Performance");
+        Add("avail", @"\Memory\Available MBytes");
+        Add("sb1",   @"\Memory\Standby Cache Normal Priority Bytes");
+        Add("sb2",   @"\Memory\Standby Cache Core Bytes");
+        Add("sb3",   @"\Memory\Standby Cache Reserve Bytes");
+        Add("dpct",  @"\PhysicalDisk(_Total)\% Disk Time");
+        Add("dbytes",@"\PhysicalDisk(_Total)\Disk Bytes/sec");
+        Add("gpu",   @"\GPU Engine(*engtype_3D)\Utilization Percentage");
+        PdhCollectQueryData(q);
+        if (!string.IsNullOrEmpty(nvidiaSmiPath)) StartSmi(nvidiaSmiPath);
+        running = true;
+        worker = new Thread(Loop) { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "LagSampler" };
+        worker.Start();
+    }
+
+    static void StartSmi(string path) {
+        try {
+            var psi = new ProcessStartInfo(path, "--query-gpu=utilization.gpu,temperature.gpu,memory.used --format=csv,noheader,nounits -lms " + intervalMs) {
+                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true
+            };
+            smi = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            smi.OutputDataReceived += (s, e) => {
+                if (string.IsNullOrEmpty(e.Data)) return;
+                var parts = e.Data.Split(',');
+                double a, b, d;
+                if (parts.Length >= 3 && double.TryParse(parts[0].Trim(), out a) && double.TryParse(parts[1].Trim(), out b) && double.TryParse(parts[2].Trim(), out d)) {
+                    Gpu = a; GpuTemp = b; Vram = d; smiLast = DateTime.UtcNow;
+                }
+            };
+            smi.Start();
+            smi.BeginOutputReadLine();
+            smi.BeginErrorReadLine();
+            try { smi.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
+        } catch (Exception ex) { LastError = "nvidia-smi: " + ex.Message; smi = null; }
+    }
+
+    static void Loop() {
+        while (running) {
+            try {
+                Thread.Sleep(intervalMs);
+                if (PdhCollectQueryData(q) != 0) continue;
+                Cpu = Val("cpu");
+                double max = -1;
+                foreach (var kv in Arr("cores")) if (kv.Key != "_Total" && kv.Value > max) max = kv.Value;
+                Core = max;
+                Speed = Val("perf");
+                AvailMB = Val("avail");
+                double s1 = Val("sb1"), s2 = Val("sb2"), s3 = Val("sb3");
+                StandbyMB = (s1 < 0 && s2 < 0 && s3 < 0) ? -1 : (Math.Max(0, s1) + Math.Max(0, s2) + Math.Max(0, s3)) / 1048576.0;
+                DiskPct = Val("dpct");
+                double db = Val("dbytes"); DiskMBs = db < 0 ? -1 : db / 1048576.0;
+                // GPU from PDH only if nvidia-smi isn't delivering
+                if (smi == null || (DateTime.UtcNow - smiLast).TotalSeconds > 10) {
+                    double sum = 0; bool any = false;
+                    foreach (var kv in Arr("gpu")) { sum += kv.Value; any = true; }
+                    Gpu = any ? Math.Min(100, sum) : -1;
+                    if (smi == null) { GpuTemp = -1; Vram = -1; }
+                }
+                Ready = true;
+            } catch (Exception ex) { LastError = ex.Message; }
+        }
+    }
+
+    public static void Stop() {
+        running = false;
+        try { if (smi != null && !smi.HasExited) smi.Kill(); } catch { }
+        try { if (q != IntPtr.Zero) PdhCloseQuery(q); } catch { }
+    }
+
+    // ---- cheap helpers used by the UI thread ----
+    [StructLayout(LayoutKind.Sequential)]
+    class MEMORYSTATUSEX {
+        public uint dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+        public uint dwMemoryLoad; public ulong ullTotalPhys; public ulong ullAvailPhys; public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile; public ulong ullTotalVirtual; public ulong ullAvailVirtual; public ulong ullAvailExtendedVirtual;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX m);
+    public static int FreeRamMB() { var m = new MEMORYSTATUSEX(); return GlobalMemoryStatusEx(m) ? (int)(m.ullAvailPhys / 1048576) : -1; }
+    public static int TotalRamMB() { var m = new MEMORYSTATUSEX(); return GlobalMemoryStatusEx(m) ? (int)(m.ullTotalPhys / 1048576) : -1; }
+
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    // PIDs that own a visible top-level window (fast; replaces Process.MainWindowHandle on every process)
+    public static int[] WindowPids() {
+        var set = new HashSet<int>();
+        EnumWindows((h, l) => { if (IsWindowVisible(h)) { uint pid; GetWindowThreadProcessId(h, out pid); set.Add((int)pid); } return true; }, IntPtr.Zero);
+        var a = new int[set.Count]; set.CopyTo(a); return a;
+    }
+}
+"@
 
 # ---------------- Files ----------------
 $configPath = Join-Path $appDir "LagScope.config.json"
@@ -139,90 +306,106 @@ function Test-NameMatch($name, $patterns) {
     foreach ($pat in @($patterns)) { if ($pat -and $name -like $pat) { return $true } }
     return $false
 }
-function Get-FreeRamMB { [int](Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes }
+function Get-FreeRamMB { [LagSampler]::FreeRamMB() }
 
-# ---------------- Game detection ----------------
+# ---------------- Game detection (cheap) ----------------
+$script:windowPids = @{}
 function Test-IsGame($proc, $cfg) {
     $name = $proc.ProcessName
     if (Test-NameMatch $name $cfg.notGames) { return $false }
     if (Test-NameMatch $name $cfg.games) { return $true }
+    if (-not $script:windowPids.ContainsKey([int]$proc.Id)) { return $false }   # games have a window
     $path = $null
     try { $path = $proc.Path } catch {}
     if (-not $path) { return $false }
-    foreach ($folder in @($cfg.autoDetectGameFolders)) {
-        if ($folder -and $path -like "*$folder*" -and $proc.MainWindowHandle -ne [IntPtr]::Zero) { return $true }
-    }
+    foreach ($folder in @($cfg.autoDetectGameFolders)) { if ($folder -and $path -like "*$folder*") { return $true } }
     return $false
 }
 function Find-Game($cfg) {
-    $all = Get-Process
-    foreach ($p in $all) {
-        if ((Test-NameMatch $p.ProcessName $cfg.games) -and -not (Test-NameMatch $p.ProcessName $cfg.notGames)) { return $p }
+    # still running? (no scan needed)
+    if ($script:gameProc) {
+        try { $script:gameProc.Refresh(); if (-not $script:gameProc.HasExited) { return $script:gameProc } } catch {}
     }
-    foreach ($p in $all) { if (Test-IsGame $p $cfg) { return $p } }
+    # 1) games named in the config
+    $named = @(@($cfg.games) | Where-Object { $_ })
+    if ($named.Count) {
+        foreach ($p in @(Get-Process -Name $named -ErrorAction SilentlyContinue)) {
+            if (-not (Test-NameMatch $p.ProcessName $cfg.notGames)) { return $p }
+        }
+    }
+    # 2) windowed processes running from a game library folder (only processes that own a window are inspected)
+    $script:windowPids = @{}
+    foreach ($id in [LagSampler]::WindowPids()) { $script:windowPids[[int]$id] = $true }
+    foreach ($id in $script:windowPids.Keys) {
+        $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+        if ($p -and (Test-IsGame $p $cfg)) { return $p }
+    }
     return $null
 }
 
-# ---------------- Measurement ----------------
+# ---------------- Measurement (reads the background sampler) ----------------
 $nvsmi = @("$env:SystemRoot\System32\nvidia-smi.exe", "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe") |
          Where-Object { Test-Path $_ } | Select-Object -First 1
-function Get-Gpu {
-    if ($nvsmi) {
-        try {
-            $o = & $nvsmi --query-gpu=utilization.gpu,temperature.gpu,memory.used --format=csv,noheader,nounits 2>$null
-            $p = ($o | Select-Object -First 1) -split ",\s*"
-            return @{ Load = [int]$p[0]; Temp = [int]$p[1]; VRAM = [int]$p[2] }
-        } catch {}
-    }
-    try {
-        $e = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | Where-Object { $_.Name -like "*engtype_3D" }
-        return @{ Load = [int][math]::Min(100, ($e | Measure-Object UtilizationPercentage -Sum).Sum); Temp = $null; VRAM = $null }
-    } catch { return @{ Load = $null; Temp = $null; VRAM = $null } }
-}
-$script:cpuTempAvailable = $true
+$totalMB = [LagSampler]::TotalRamMB()
+
+# CPU temperature via WMI is slow: read it at most every 15 s and give up for good if the board doesn't expose it
+$script:cpuTempAvailable = $true; $script:cpuTemp = $null; $script:cpuTempAt = [datetime]::MinValue
 function Get-CpuTemp {
     if (-not $script:cpuTempAvailable) { return $null }
+    if (((Get-Date) - $script:cpuTempAt).TotalSeconds -lt 15) { return $script:cpuTemp }
+    $script:cpuTempAt = Get-Date
     try {
-        $z = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop
+        $z = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop -OperationTimeoutSec 2
         $c = ($z | ForEach-Object { ($_.CurrentTemperature / 10) - 273.15 } | Measure-Object -Maximum).Maximum
         if ($c -lt 15 -or $c -gt 120) { $script:cpuTempAvailable = $false; return $null }
-        return [int]$c
-    } catch { $script:cpuTempAvailable = $false; return $null }
+        $script:cpuTemp = [int]$c
+    } catch { $script:cpuTempAvailable = $false; $script:cpuTemp = $null }
+    return $script:cpuTemp
 }
-$totalMB = [math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize / 1024)
+function NullIfNeg($v) { if ($null -eq $v -or $v -lt 0) { $null } else { [int][math]::Round($v) } }
 function Measure-System {
-    $cpuAll = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor
-    $speed = $null
-    try {
-        $pi = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'" -ErrorAction Stop
-        $speed = [int]$pi.PercentProcessorPerformance
-        if (-not $speed) { $speed = [int]$pi.PercentofMaximumFrequency }
-    } catch {}
-    $mem  = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
-    $disk = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'"
-    $gpu  = Get-Gpu
-    $avail = [int]$mem.AvailableMBytes
+    $avail = [LagSampler]::FreeRamMB()
     [pscustomobject]@{
-        CPU      = [int]($cpuAll | Where-Object Name -eq "_Total").PercentProcessorTime
-        Core     = [int]($cpuAll | Where-Object Name -ne "_Total" | Measure-Object PercentProcessorTime -Maximum).Maximum
-        CpuSpeed = $speed
+        CPU      = [int](NullIfNeg ([LagSampler]::Cpu))
+        Core     = [int](NullIfNeg ([LagSampler]::Core))
+        CpuSpeed = NullIfNeg ([LagSampler]::Speed)
         CPU_C    = Get-CpuTemp
         RAM      = [int][math]::Round((($totalMB - $avail) / $totalMB) * 100)
         FreeRAM  = $avail
-        GPU      = $gpu.Load; GPU_C = $gpu.Temp; VRAM = $gpu.VRAM
-        Disk     = [int][math]::Min(100, $disk.PercentDiskTime)
-        DiskMBs  = [math]::Round($disk.DiskBytesPersec / 1MB, 1)
+        GPU      = NullIfNeg ([LagSampler]::Gpu)
+        GPU_C    = NullIfNeg ([LagSampler]::GpuTemp)
+        VRAM     = NullIfNeg ([LagSampler]::Vram)
+        Disk     = [int][math]::Min(100, [math]::Max(0, [LagSampler]::DiskPct))
+        DiskMBs  = [math]::Round([math]::Max(0, [LagSampler]::DiskMBs), 1)
     }
 }
-function Get-TopProcess($property) {
-    Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Where-Object { $_.Name -notin "_Total","Idle" } |
-        Sort-Object $property -Descending | Select-Object -First 1
+# Top process by CPU (cheap Get-Process deltas, at most every 10 s)
+$script:cpuSnap = @{}; $script:cpuSnapAt = Get-Date; $script:topCpu = "-"; $script:topCpuAt = [datetime]::MinValue
+function Get-TopCpuName {
+    if (((Get-Date) - $script:topCpuAt).TotalSeconds -lt 10) { return $script:topCpu }
+    $now = Get-Date; $snap = @{}; $best = $null; $bestDelta = 0
+    foreach ($p in Get-Process) {
+        $t = $null; try { $t = $p.TotalProcessorTime.TotalMilliseconds } catch {}
+        if ($null -eq $t) { continue }
+        $snap[$p.Id] = $t
+        if ($script:cpuSnap.ContainsKey($p.Id) -and $p.Id -ne 0) {
+            $d = $t - $script:cpuSnap[$p.Id]
+            if ($d -gt $bestDelta) { $bestDelta = $d; $best = $p.ProcessName }
+        }
+    }
+    $script:cpuSnap = $snap; $script:cpuSnapAt = $now; $script:topCpuAt = $now
+    if ($best) { $script:topCpu = $best }
+    return $script:topCpu
 }
+$script:topRam = "-"; $script:topRamAt = [datetime]::MinValue
 function Get-Diagnosis($o) {
     $s = @()
     if ($o.RAM -ge 88 -or $o.FreeRAM -lt 1024) {
-        $p = Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 1
-        $s += @{ Code = "RAM"; Message = "RAM RUNNING OUT ($($o.RAM)%, $($o.FreeRAM) MB free) - top user: $($p.ProcessName) $([math]::Round($p.WorkingSet64/1MB)) MB" }
+        if (((Get-Date) - $script:topRamAt).TotalSeconds -ge 10) {
+            $p = Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 1
+            $script:topRam = "$($p.ProcessName) $([math]::Round($p.WorkingSet64/1MB)) MB"; $script:topRamAt = Get-Date
+        }
+        $s += @{ Code = "RAM"; Message = "RAM RUNNING OUT ($($o.RAM)%, $($o.FreeRAM) MB free) - top user: $($script:topRam)" }
     }
     if ($null -ne $o.CPU_C -and $o.CPU_C -ge 90) { $s += @{ Code = "CPU_HEAT"; Message = "CPU OVERHEATING ($($o.CPU_C) C)" } }
     if ($null -ne $o.CpuSpeed -and $o.CPU -ge 40 -and $o.CpuSpeed -lt 80) {
@@ -231,13 +414,12 @@ function Get-Diagnosis($o) {
     if ($null -ne $o.GPU_C -and $o.GPU_C -ge 83) { $s += @{ Code = "GPU_HEAT"; Message = "GPU HOT ($($o.GPU_C) C) - may throttle. Check fans / dust / airflow" } }
     $gpuWaiting = ($null -eq $o.GPU) -or ($o.GPU -lt 85)
     if ($o.CPU -ge 90 -or ($o.Core -ge 95 -and $gpuWaiting)) {
-        $p = Get-TopProcess PercentProcessorTime
+        $topName = Get-TopCpuName
         $gpuText = if ($null -ne $o.GPU) { ", GPU only at $($o.GPU)% - waiting" } else { "" }
-        $s += @{ Code = "CPU_BOTTLENECK"; Message = "CPU BOTTLENECK (total $($o.CPU)%, busiest core $($o.Core)%$gpuText) - top: $($p.Name)" }
+        $s += @{ Code = "CPU_BOTTLENECK"; Message = "CPU BOTTLENECK (total $($o.CPU)%, busiest core $($o.Core)%$gpuText) - top: $topName" }
     }
     if ($o.Disk -ge 90) {
-        $p = Get-TopProcess IODataBytesPersec
-        $s += @{ Code = "DISK"; Message = "DISK CAN'T KEEP UP ($($o.Disk)%, $($o.DiskMBs) MB/s) - top: $($p.Name)" }
+        $s += @{ Code = "DISK"; Message = "DISK CAN'T KEEP UP ($($o.Disk)%, $($o.DiskMBs) MB/s)" }
     }
     if ($s.Count -eq 0 -and $null -ne $o.GPU -and $o.GPU -ge 97) {
         $s += @{ Code = "GPU_MAXED"; Message = "GPU fully loaded ($($o.GPU)%) - normal; lower graphics settings if FPS is low" }
@@ -336,6 +518,7 @@ $script:previousPowerPlan = $null
 $script:gameProc = $null
 $script:lastPurge = [datetime]::MinValue
 
+$script:pendingKills = @()   # apps asked to close; killed by the timer if still running after the grace period
 function Close-Apps($cfg, $gamePid) {
     $targets = @(Get-Process | Where-Object {
         $_.Id -ne $gamePid -and $_.Id -ne $PID -and
@@ -343,17 +526,25 @@ function Close-Apps($cfg, $gamePid) {
         -not (Test-NameMatch $_.ProcessName $cfg.neverTouch) -and
         -not (Test-NameMatch $_.ProcessName $systemCritical)
     })
-    if (-not $targets) { return @() }
-    foreach ($p in $targets) { try { [void]$p.CloseMainWindow() } catch {} }
-    $wait = [int]$cfg.forceCloseAfterSeconds
-    if ($wait -gt 0) { Start-Sleep -Seconds $wait }
     $closed = @()
+    $deadline = (Get-Date).AddSeconds([math]::Max(0, [int]$cfg.forceCloseAfterSeconds))
     foreach ($p in $targets) {
         $path = $null; try { $path = $p.Path } catch {}
-        try { $p.Refresh(); if (-not $p.HasExited -and $wait -gt 0) { Stop-Process -Id $p.Id -Force -ErrorAction Stop } } catch {}
+        try { [void]$p.CloseMainWindow() } catch {}
+        if ([int]$cfg.forceCloseAfterSeconds -gt 0) { $script:pendingKills += [pscustomobject]@{ Id = $p.Id; Name = $p.ProcessName; At = $deadline } }
         $closed += [pscustomobject]@{ Name = $p.ProcessName; Path = $path }
     }
     return $closed
+}
+function Invoke-PendingKills {
+    if (-not $script:pendingKills.Count) { return }
+    $now = Get-Date; $left = @()
+    foreach ($k in $script:pendingKills) {
+        if ($now -lt $k.At) { $left += $k; continue }
+        $p = Get-Process -Id $k.Id -ErrorAction SilentlyContinue
+        if ($p -and $p.ProcessName -eq $k.Name) { try { Stop-Process -Id $k.Id -Force -ErrorAction Stop } catch {} }
+    }
+    $script:pendingKills = $left
 }
 
 function Stop-DevTools($cfg) {
@@ -378,8 +569,8 @@ function Stop-DevTools($cfg) {
         }
     }
     if ($cfg.shutdownWsl -and (Get-Process -Name 'vmmemWSL' -ErrorAction SilentlyContinue) -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-        wsl.exe --shutdown 2>$null
-        $stopped += "WSL"; Write-Log "WSL shut down"
+        Start-Process -FilePath "wsl.exe" -ArgumentList "--shutdown" -WindowStyle Hidden
+        $stopped += "WSL"; Write-Log "WSL shutting down"
     }
     return @($stopped | Select-Object -Unique)
 }
@@ -452,7 +643,6 @@ function Start-Boost($game, $cfg) {
         if ((Get-ActivePowerPlan) -eq $hp) { Write-Log "Power plan: High performance" } else { $script:previousPowerPlan = $null }
     }
 
-    Start-Sleep -Milliseconds 800
     $after = Get-FreeRamMB
     $freed = [math]::Max(0, $after - $before)
     Write-Log "Free RAM after: $after MB (+$freed MB)"
@@ -462,6 +652,7 @@ function Start-Boost($game, $cfg) {
 }
 
 function Stop-Boost($cfg) {
+    $script:pendingKills = @()
     Write-Log "=== Game closed. Restoring... ==="
     if ($script:previousPowerPlan) { powercfg /setactive $script:previousPowerPlan 2>$null | Out-Null; Write-Log "Power plan restored" }
     foreach ($svcName in $script:stoppedServices) { try { Start-Service -Name $svcName -ErrorAction Stop } catch {} }
@@ -478,9 +669,9 @@ function Stop-Boost($cfg) {
 function Invoke-AutoRamClean($cfg) {
     if (-not $isAdmin -or -not $cfg.autoRamCleaner) { return }
     if (((Get-Date) - $script:lastPurge).TotalSeconds -lt [int]$cfg.ramCleanerCooldownSeconds) { return }
-    $m = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
-    $standbyMB = [math]::Round(([double]$m.StandbyCacheNormalPriorityBytes + [double]$m.StandbyCoreBytes + [double]$m.StandbyCacheReserveBytes) / 1MB)
-    $freeMB = [math]::Max(0, [int]$m.AvailableMBytes - $standbyMB)
+    $standbyMB = [int][LagSampler]::StandbyMB
+    if ($standbyMB -lt 0) { return }
+    $freeMB = [math]::Max(0, [LagSampler]::FreeRamMB() - $standbyMB)
     if ($freeMB -lt [int]$cfg.ramCleanerMinFreeMB -and $standbyMB -gt [int]$cfg.ramCleanerMinStandbyMB) {
         $r = [LagScopeNative]::MemoryCommand(4)
         $script:lastPurge = Get-Date
@@ -775,7 +966,7 @@ foreach ($mode in @(@("auto","Only while gaming"), @("always","Always"), @("off"
 })
 ($menu.Items.Add("Clean RAM now")).Add_Click({
     if ($isAdmin) {
-        $b = Get-FreeRamMB; [void][LagScopeNative]::MemoryCommand(4); $script:lastPurge = Get-Date; Start-Sleep -Milliseconds 500; $a = Get-FreeRamMB
+        $b = Get-FreeRamMB; [void][LagScopeNative]::MemoryCommand(4); $script:lastPurge = Get-Date; $a = Get-FreeRamMB
         $tray.ShowBalloonTip(3000, "LagScope", "RAM cleaned: $b MB -> $a MB free", [System.Windows.Forms.ToolTipIcon]::Info)
     }
 })
@@ -797,6 +988,7 @@ $autoItem.Add_Click({ Set-Autostart (-not $autoItem.Checked); $autoItem.Checked 
     if ($script:boosted) { Stop-Boost $script:cfg }
     if ($script:session) { [void](New-Report) }
     $tray.Visible = $false
+    [LagSampler]::Stop()
     $form.Close()
     [System.Windows.Forms.Application]::Exit()
 })
@@ -816,9 +1008,11 @@ $timer.Interval = [math]::Max(1000, [int]$script:cfg.sampleIntervalMs)
 $timer.Add_Tick({
     try {
         $cfg = $script:cfg
+        Invoke-PendingKills
 
         # Game detection every ~3 s
-        if (((Get-Date) - $script:lastGameCheck).TotalSeconds -ge 3) {
+        $gameEvery = if ($script:session) { 3 } else { 5 }
+        if (((Get-Date) - $script:lastGameCheck).TotalSeconds -ge $gameEvery) {
             $script:lastGameCheck = Get-Date
             $game = Find-Game $cfg
             if ($game -and -not $script:session) {
@@ -843,6 +1037,7 @@ $timer.Add_Tick({
                     $report = New-Report
                     $first = ($report -split "`r`n" | Where-Object { $_ -like ">>>*" } | Select-Object -First 1)
                     $script:session = $null
+                    $script:gameProc = $null
                     $statusItem.Text = "Waiting for a game..."
                     $tray.Text = "LagScope - waiting for a game"
                     Update-OverlayVisibility
@@ -869,6 +1064,7 @@ $timer.Add_Tick({
     } catch { Write-Log "Error: $($_.Exception.Message)"; if (-not $timer.Enabled) { $timer.Start() } }
 })
 
+[LagSampler]::Start([int]$script:cfg.sampleIntervalMs, $nvsmi)
 Write-Log "LagScope started (admin: $isAdmin)"
 $tray.ShowBalloonTip(3000, "LagScope is running", "I'll take care of your PC as soon as a game starts. Right-click the shield icon for options.", [System.Windows.Forms.ToolTipIcon]::Info)
 Update-OverlayVisibility
@@ -878,5 +1074,6 @@ if (-not $script:cfg.appPickerShown) {
 }
 $timer.Start()
 [System.Windows.Forms.Application]::Run()
+[LagSampler]::Stop()
 $tray.Dispose()
-$script:mutex.ReleaseMutex()
+try { $script:mutex.ReleaseMutex() } catch {}

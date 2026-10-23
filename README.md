@@ -92,7 +92,7 @@ Tray switches are saved here automatically. Other useful keys:
 
 ## How it works
 
-- Measurements come from built-in Windows performance counters (CIM/WMI) and work in any Windows language.
+- Measurements come from Windows performance counters via PDH with English counter names, so they work in any Windows language. Sampling runs on a background thread and doesn't use WMI, so LagScope itself never causes hitches.
 - CPU throttling is detected from `% Processor Performance`, with no extra driver needed.
 - RAM: `EmptyWorkingSet` for big background processes and `NtSetSystemInformation` to purge the standby list.
 - Games are detected by name or by running from a game library folder (`steamapps\common`, `Epic Games`, …).
